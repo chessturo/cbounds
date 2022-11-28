@@ -1,111 +1,108 @@
-#include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/AST/AST.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/Sema/Sema.h"
 #include "llvm/Support/raw_ostream.h"
+#include <clang/AST/ASTTypeTraits.h>
+#include <clang/AST/Expr.h>
+#include <clang/ASTMatchers/ASTMatchersInternal.h>
+#include <memory>
+
 using namespace clang;
+using namespace ast_matchers;
 
 namespace {
 
-class PrintFunctionsConsumer : public ASTConsumer {
-  CompilerInstance &Instance;
-  std::set<std::string> ParsedTemplates;
+class IntLiteralAction : public MatchFinder::MatchCallback {
+private:
+  unsigned int diag_id;
 
 public:
-  PrintFunctionsConsumer(CompilerInstance &Instance,
-                         std::set<std::string> ParsedTemplates)
-      : Instance(Instance), ParsedTemplates(ParsedTemplates) {}
+  IntLiteralAction(unsigned int diag_id) : diag_id(diag_id) {}
 
-  bool HandleTopLevelDecl(DeclGroupRef DG) override {
-    for (DeclGroupRef::iterator i = DG.begin(), e = DG.end(); i != e; ++i) {
-      const Decl *D = *i;
-      if (const NamedDecl *ND = dyn_cast<NamedDecl>(D))
-        llvm::errs() << "top-level-decl: \"" << ND->getNameAsString() << "\"\n";
-    }
-
-    return true;
-  }
-
-  void HandleTranslationUnit(ASTContext& context) override {
-    if (!Instance.getLangOpts().DelayedTemplateParsing)
-      return;
-
-    // This demonstrates how to force instantiation of some templates in
-    // -fdelayed-template-parsing mode. (Note: Doing this unconditionally for
-    // all templates is similar to not using -fdelayed-template-parsig in the
-    // first place.)
-    // The advantage of doing this in HandleTranslationUnit() is that all
-    // codegen (when using -add-plugin) is completely finished and this can't
-    // affect the compiler output.
-    struct Visitor : public RecursiveASTVisitor<Visitor> {
-      const std::set<std::string> &ParsedTemplates;
-      Visitor(const std::set<std::string> &ParsedTemplates)
-          : ParsedTemplates(ParsedTemplates) {}
-      bool VisitFunctionDecl(FunctionDecl *FD) {
-        if (FD->isLateTemplateParsed() &&
-            ParsedTemplates.count(FD->getNameAsString()))
-          LateParsedDecls.insert(FD);
-        return true;
-      }
-
-      std::set<FunctionDecl*> LateParsedDecls;
-    } v(ParsedTemplates);
-    v.TraverseDecl(context.getTranslationUnitDecl());
-    clang::Sema &sema = Instance.getSema();
-    for (const FunctionDecl *FD : v.LateParsedDecls) {
-      clang::LateParsedTemplate &LPT =
-          *sema.LateParsedTemplateMap.find(FD)->second;
-      sema.LateTemplateParser(sema.OpaqueParser, LPT);
-      llvm::errs() << "late-parsed-decl: \"" << FD->getNameAsString() << "\"\n";
-    }   
+  void run(const MatchFinder::MatchResult &mr) override {
+    auto &diag = mr.Context->getDiagnostics();
+    auto *val = mr.Nodes.getNodeAs<IntegerLiteral>("val");
+    diag.Report(val->getBeginLoc(), diag_id) << val->getSourceRange();
   }
 };
 
-class PrintFunctionNamesAction : public PluginASTAction {
-  std::set<std::string> ParsedTemplates;
+class AssignmentAction : public MatchFinder::MatchCallback {
+private:
+  unsigned int diag_id;
+
+public:
+  AssignmentAction(unsigned int diag_id) : diag_id(diag_id) {}
+
+  void run(const MatchFinder::MatchResult &mr) override {
+    auto &diag = mr.Context->getDiagnostics();
+    auto *val = mr.Nodes.getNodeAs<BinaryOperator>("op");
+    diag.Report(val->getBeginLoc(), diag_id) << val->getSourceRange();
+  }
+};
+
+DeclarationMatcher buildPositiveIntMatcher() {
+  return varDecl(hasInitializer(integerLiteral().bind("val")));
+}
+DeclarationMatcher buildNegativeIntMatcher() {
+  return varDecl(hasInitializer(unaryOperator(
+      hasOperatorName("-"), hasUnaryOperand(integerLiteral().bind("val")))));
+}
+StatementMatcher buildIntegerAssignmentMatcher() {
+  return binaryOperator(
+      hasOperatorName("="),
+      hasLHS(hasType(isInteger())))
+    .bind("op");
+}
+
+// We need to hold references to all of these because the ASTConsuer returned
+// by CreateASTConsumer hold references to them, so we have to keep them
+// alive.
+//
+// I'm not sure why static lifetime is needed for these pointers, but having
+// them in the ASTAction causes clang to segfault.
+std::unique_ptr<MatchFinder> matchFinder;
+std::unique_ptr<MatchFinder::MatchCallback> act1, act2, act3;
+
+class BoundsCheckAction : public PluginASTAction {
 protected:
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
                                                  llvm::StringRef) override {
-    return std::make_unique<PrintFunctionsConsumer>(CI, ParsedTemplates);
+    assert(CI.hasASTContext());
+
+    auto &diag = CI.getASTContext().getDiagnostics();
+    unsigned int diag_id = diag.getCustomDiagID(
+        DiagnosticsEngine::Warning, "match detected");
+
+    matchFinder = std::make_unique<MatchFinder>();
+    act1 = std::make_unique<IntLiteralAction>(diag_id);
+    act2 = std::make_unique<IntLiteralAction>(diag_id);
+    act3 = std::make_unique<AssignmentAction>(diag_id);
+
+    matchFinder->addMatcher(
+        traverse(TK_AsIs, buildPositiveIntMatcher()),
+        act1.get());
+    matchFinder->addMatcher(
+        traverse(TK_AsIs, buildNegativeIntMatcher()),
+        act2.get());
+    matchFinder->addMatcher(
+        traverse(TK_AsIs, buildIntegerAssignmentMatcher()),
+        act3.get());
+
+    return matchFinder->newASTConsumer();
   }
 
   bool ParseArgs(const CompilerInstance &CI,
                  const std::vector<std::string> &args) override {
-    for (unsigned i = 0, e = args.size(); i != e; ++i) {
-      llvm::errs() << "PrintFunctionNames arg = " << args[i] << "\n";
-
-      // Example error handling.
-      DiagnosticsEngine &D = CI.getDiagnostics();
-      if (args[i] == "-an-error") {
-        unsigned DiagID = D.getCustomDiagID(DiagnosticsEngine::Error,
-                                            "invalid argument '%0'");
-        D.Report(DiagID) << args[i];
-        return false;
-      } else if (args[i] == "-parse-template") {
-        if (i + 1 >= e) {
-          D.Report(D.getCustomDiagID(DiagnosticsEngine::Error,
-                                     "missing -parse-template argument"));
-          return false;
-        }
-        ++i;
-        ParsedTemplates.insert(args[i]);
-      }
-    }
-    if (!args.empty() && args[0] == "help")
-      PrintHelp(llvm::errs());
-
     return true;
   }
-  void PrintHelp(llvm::raw_ostream& ros) {
-    ros << "Help for PrintFunctionNames plugin goes here\n";
-  }
-
 };
 
-}
+} // namespace
 
-static FrontendPluginRegistry::Add<PrintFunctionNamesAction>
-X("print-fns", "print function names");
-
+static FrontendPluginRegistry::Add<BoundsCheckAction> X("cbounds",
+                                                        "Check array accesses");
