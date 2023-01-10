@@ -3,6 +3,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
+#include "clang/Analysis/CFG.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/Sema/Sema.h"
@@ -27,7 +28,7 @@ public:
   void run(const MatchFinder::MatchResult &mr) override {
     auto &diag = mr.Context->getDiagnostics();
     auto *val = mr.Nodes.getNodeAs<IntegerLiteral>("val");
-    diag.Report(val->getBeginLoc(), diag_id) << val->getSourceRange();
+    // diag.Report(val->getBeginLoc(), diag_id) << val->getSourceRange();
   }
 };
 
@@ -41,7 +42,35 @@ public:
   void run(const MatchFinder::MatchResult &mr) override {
     auto &diag = mr.Context->getDiagnostics();
     auto *val = mr.Nodes.getNodeAs<BinaryOperator>("op");
-    diag.Report(val->getBeginLoc(), diag_id) << val->getSourceRange();
+    // diag.Report(val->getBeginLoc(), diag_id) << val->getSourceRange();
+  }
+};
+
+class FunctionDeclAction : public MatchFinder::MatchCallback {
+private:
+  unsigned int linear_diag, nonlinear_diag;
+
+public:
+  FunctionDeclAction(unsigned int linear_diag, unsigned int nonlinear_diag)
+      : linear_diag(linear_diag), nonlinear_diag(nonlinear_diag) {}
+
+  void run(const MatchFinder::MatchResult &mr) override {
+    auto &diag = mr.Context->getDiagnostics();
+    auto *decl = mr.Nodes.getNodeAs<FunctionDecl>("decl");
+    Stmt *body = decl->getBody();
+
+    std::unique_ptr<CFG> cfg =
+        CFG::buildCFG(decl, body, mr.Context, CFG::BuildOptions());
+
+    if (cfg->isLinear()) {
+      diag.Report(decl->getBeginLoc(), linear_diag) << decl->getSourceRange();
+    } else {
+      diag.Report(decl->getBeginLoc(), nonlinear_diag)
+          << decl->getSourceRange();
+    }
+
+    cfg->front().front().getKind();
+    cfg->dump(LangOptions(), true);
   }
 };
 
@@ -53,10 +82,11 @@ DeclarationMatcher buildNegativeIntMatcher() {
       hasOperatorName("-"), hasUnaryOperand(integerLiteral().bind("val")))));
 }
 StatementMatcher buildIntegerAssignmentMatcher() {
-  return binaryOperator(
-      hasOperatorName("="),
-      hasLHS(hasType(isInteger())))
-    .bind("op");
+  return binaryOperator(hasOperatorName("="), hasLHS(hasType(isInteger())))
+      .bind("op");
+}
+DeclarationMatcher buildFunctionMatcher() {
+  return functionDecl().bind("decl");
 }
 
 // We need to hold references to all of these because the ASTConsuer returned
@@ -66,7 +96,7 @@ StatementMatcher buildIntegerAssignmentMatcher() {
 // I'm not sure why static lifetime is needed for these pointers, but having
 // them in the ASTAction causes clang to segfault.
 std::unique_ptr<MatchFinder> matchFinder;
-std::unique_ptr<MatchFinder::MatchCallback> act1, act2, act3;
+std::unique_ptr<MatchFinder::MatchCallback> act1, act2, act3, act4;
 
 class BoundsCheckAction : public PluginASTAction {
 protected:
@@ -75,23 +105,27 @@ protected:
     assert(CI.hasASTContext());
 
     auto &diag = CI.getASTContext().getDiagnostics();
-    unsigned int diag_id = diag.getCustomDiagID(
-        DiagnosticsEngine::Warning, "match detected");
+    unsigned int diag_id =
+        diag.getCustomDiagID(DiagnosticsEngine::Warning, "match detected");
+    unsigned int linear_id = diag.getCustomDiagID(DiagnosticsEngine::Warning,
+                                                  "linear function detected");
+    unsigned int nonlinear_id = diag.getCustomDiagID(
+        DiagnosticsEngine::Warning, "nonlinear function detected");
 
     matchFinder = std::make_unique<MatchFinder>();
     act1 = std::make_unique<IntLiteralAction>(diag_id);
     act2 = std::make_unique<IntLiteralAction>(diag_id);
     act3 = std::make_unique<AssignmentAction>(diag_id);
+    act4 = std::make_unique<FunctionDeclAction>(linear_id, nonlinear_id);
 
-    matchFinder->addMatcher(
-        traverse(TK_AsIs, buildPositiveIntMatcher()),
-        act1.get());
-    matchFinder->addMatcher(
-        traverse(TK_AsIs, buildNegativeIntMatcher()),
-        act2.get());
-    matchFinder->addMatcher(
-        traverse(TK_AsIs, buildIntegerAssignmentMatcher()),
-        act3.get());
+    matchFinder->addMatcher(traverse(TK_AsIs, buildPositiveIntMatcher()),
+                            act1.get());
+    matchFinder->addMatcher(traverse(TK_AsIs, buildNegativeIntMatcher()),
+                            act2.get());
+    matchFinder->addMatcher(traverse(TK_AsIs, buildIntegerAssignmentMatcher()),
+                            act3.get());
+    matchFinder->addMatcher(traverse(TK_AsIs, buildFunctionMatcher()),
+                            act4.get());
 
     return matchFinder->newASTConsumer();
   }
@@ -106,3 +140,4 @@ protected:
 
 static FrontendPluginRegistry::Add<BoundsCheckAction> X("cbounds",
                                                         "Check array accesses");
+
