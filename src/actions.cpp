@@ -19,7 +19,7 @@ void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
   std::ostringstream edges = std::ostringstream();
   for (auto itr = cfg->begin(); itr != cfg->end(); ++itr) {
     CFGBlock* curr = *itr;
-    llvm::errs() << "Outer loop \n";
+
     curr->dump();
 
     int lbl = curr->getBlockID();
@@ -27,18 +27,14 @@ void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
     for (auto succ_itr = curr->succ_begin();
         succ_itr != curr->succ_end();
         ++succ_itr) {
-      llvm::errs() << "Inner loop \n";
-      if (succ_itr->getPossiblyUnreachableBlock() != nullptr) {
-        succ_itr->getPossiblyUnreachableBlock()->dump();
-        edges << lbl << " -> " <<
-          succ_itr->getPossiblyUnreachableBlock()->getBlockID() << std::endl;
-      } else {
-        llvm::errs() << "nullptr in innerloop \n";
+      if(succ_itr->getReachableBlock()) {
+        this->file << "\"" << lbl << "\" -> " << "\"" <<
+          succ_itr->getReachableBlock()->BlockID << "\"" << std::endl;
       }
     }
   }
 
-  this->file << edges.str() << "}";
+  this->file << edges.str() << "}" << std::endl;
 }
 
 DeclarationMatcher VisualizeCFGAction::matcher() {
