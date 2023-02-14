@@ -1,8 +1,10 @@
 #include "actions.h"
 
+#include <regex>
+#include <sstream>
+
 #include <llvm/Support/Casting.h>
 #include <llvm/Support/raw_ostream.h>
-#include <sstream>
 
 #include <clang/Analysis/CFG.h>
 #include <clang/AST/Decl.h>
@@ -38,6 +40,9 @@ void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
             this->file << "<tr><td>";
 
             stmt->printPretty(raw_oss, nullptr, PrintingPolicy(LangOptions()));
+            stmt_str = std::regex_replace(stmt_str, std::regex("&"), "&amp;");
+            stmt_str = std::regex_replace(stmt_str, std::regex("<"), "&lt;");
+            stmt_str = std::regex_replace(stmt_str, std::regex(">"), "&gt;");
             this->file << stmt_str;
             stmt_str.clear();
 
@@ -52,14 +57,25 @@ void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
     }
     this->file << "];" << std::endl;
 
-    // Print all the edges
-    for (auto succ_itr = curr->succ_begin();
-        succ_itr != curr->succ_end();
-        ++succ_itr) {
-      if (CFGBlock* block = succ_itr->getReachableBlock()) {
-        this->file << "\"" << lbl << "\" -> " << "\"" << block->BlockID <<
-          "\""<< std::endl;
+    // Print the successors
+    if (curr->succ_size() == 1) {
+      if (CFGBlock* block = curr->succ_begin()->getReachableBlock()) {
+        this->file << "\"" << lbl << "\" -> " << "\"" << block->BlockID << "\""
+          << std::endl;
       }
+    } else if (curr->succ_size() == 2) {
+      auto itr = curr->succ_begin();
+      if (CFGBlock* block = itr->getReachableBlock()) {
+        this->file << "\"" << lbl << "\" -> " << "\"" << block->BlockID << "\""
+          << "[ label = \"true\"]; " << std::endl;
+      }
+      ++itr;
+      if (CFGBlock* block = itr->getReachableBlock()) {
+        this->file << "\"" << lbl << "\" -> " << "\"" << block->BlockID << "\""
+          << "[ label = \"false\"]; " << std::endl;
+      }
+    } else {
+      assert(&cfg->getExit() == curr);
     }
   }
 
@@ -67,5 +83,5 @@ void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
 }
 
 DeclarationMatcher VisualizeCFGAction::matcher() {
-  return functionDecl().bind("decl");
+  return functionDecl(isDefinition()).bind("decl");
 }
