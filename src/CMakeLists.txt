@@ -1,4 +1,4 @@
-add_library(cbounds SHARED plugin.cpp actions.cpp)
+add_library(cbounds SHARED plugin.cpp VisualizeCFGAction.cpp BuildDataflowAction.cpp)
 include_directories(include)
 target_compile_options(cbounds PUBLIC -fno-exceptions -fno-rtti)
 # Force standard to be included in compile_commands.json

@@ -1,12 +1,18 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+int global = 0;
+
 int main(int argc, char *argv[]) {
   int p;
   scanf("Enter an integer: %d\n", &p);
   while (p++) {
     printf("Still negative!\n");
   }
+
+  global = 1;
+  int arr[3];
+  arr[1] = global;
 
   scanf("Enter an integer: %d\n", &p);
   p += 7;

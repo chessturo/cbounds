@@ -1,4 +1,4 @@
-#include "actions.h"
+#include "VisualizeCFGAction.h"
 
 #include <regex>
 #include <sstream>
@@ -10,6 +10,11 @@
 #include <clang/AST/Decl.h>
 #include <clang/ASTMatchers/ASTMatchFinder.h>
 #include <clang/ASTMatchers/ASTMatchers.h>
+
+using namespace clang;
+using namespace clang::ast_matchers;
+
+namespace cbounds {
 
 void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
   const FunctionDecl* decl = mr.Nodes.getNodeAs<FunctionDecl>("decl");
@@ -31,13 +36,15 @@ void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
       this->file << "label=<<table>";
       std::string stmt_str;
       llvm::raw_string_ostream raw_oss(stmt_str);
-      for (auto& elt : *curr) {
-        switch(elt.getKind()) {
+      for (auto elt : curr->refs()) {
+        switch(elt->getKind()) {
           case CFGElement::Kind::Statement: {
-            CFGStmt cfg_stmt = elt.castAs<CFGStmt>();
+            CFGStmt cfg_stmt = elt->castAs<CFGStmt>();
             const Stmt* stmt = cfg_stmt.getStmt();
 
-            this->file << "<tr><td>";
+            this->file << "<tr>";
+            this->file << "<td>" << elt.getIndexInBlock() << ". </td>";
+            this->file << "<td>";
 
             stmt->printPretty(raw_oss, nullptr, PrintingPolicy(LangOptions()));
             stmt_str = std::regex_replace(stmt_str, std::regex("&"), "&amp;");
@@ -46,7 +53,8 @@ void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
             this->file << stmt_str;
             stmt_str.clear();
 
-            this->file << "</td></tr>";
+            this->file << "</td>";
+            this->file << "</tr>";
             break;
           }
           default:
@@ -85,3 +93,6 @@ void VisualizeCFGAction::run(const MatchFinder::MatchResult& mr)  {
 DeclarationMatcher VisualizeCFGAction::matcher() {
   return functionDecl(isDefinition()).bind("decl");
 }
+
+} // namespace cbounds
+
